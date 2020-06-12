@@ -1,70 +1,197 @@
-#!/bin/bash
-
+#!/bin/sh
+#
 # Written by Vasiliy Solovey, 2016
+#
+# Modified by Ezequiel Valenzuela, 2020
+#
+set -e
 
-ARCH=$1
-if [ "$ARCH" == "arm" ]; then
-  ARCH="armv7"
-fi
+# support functions {{{
+prgname="${0##*/}"
 
-ARCH_EXT=$ARCH
-if [ "$ARCH_EXT" == "armv7" ]; then
-  ARCH_EXT="armeabiv7a"
-fi
+echo_to_stderr()
+{
+  echo "$prgname:" "$@" 1>&2
+}
 
-echo $ARCH_EXT
+usage()
+{
+  cat <<EOS
+Syntax:
+  $prgname [arm|x86]
 
-BUILD_DIR="build_dir"
-DIST_DIR="dist"
+EOS
+  exit 1
+}
+
+info()
+{
+  echo_to_stderr "[info]" "$@"
+}
+
+error()
+{
+  echo_to_stderr "ERROR:" "$@"
+  return 1
+}
+
+die()
+{
+  error "$@" || exit 1
+}
+
+# args: DIRECTORY
+mkdir_clean()
+{
+  l_dir="$1"
+  [ -n "${l_dir}" ] \
+    || die "mkdir_clean(): invalid args: please specify a directory pathname"
+
+  if [ -d "${l_dir}/" ] ; then
+    rm -fr "${l_dir}" \
+      || error "could not remove existing directory '${l_dir}'" \
+      || return $?
+  fi
+  [ ! -e "${l_dir}" ] \
+    || error "pathname '${l_dir}' already exists, but it is not a directory." \
+    || return $?
+  mkdir -pv "${l_dir}"
+}
+# }}}
+
+ARCH_OWN="$1"
+ARCH="$ARCH_OWN"
+case "$ARCH" in
+  arm | armv7 )
+    ARCH="armv7"
+    ARCH_OWN="arm"
+    ;;
+  x86 )
+    : ;;
+  '' )
+    usage ;;
+  * )
+    die "unsupported/unrecognised architecture id: '${ARCH}'" ;;
+esac
+info "ARCH='${ARCH}'"
+
+ARCH_EXT_LIST="$ARCH"
+case "$ARCH_EXT_LIST" in
+  armv7 )
+    ARCH_EXT_LIST="armeabiv7a armeabi-v7a" ;;
+esac
+info "ARCH_EXT_LIST='${ARCH_EXT_LIST}'"
+
+: "${BUILD_DIR:=build_dir}"
+: "${DIST_DIR:=dist}"
+
 LATEST_ANDROID_ENGINE_URI="http://dl.acestream.org/products/acestream-engine/android/$ARCH/latest"
 
-echo "Cleaning up..."
-rm -r $BUILD_DIR
-rm -r $DIST_DIR
+startdir="${0%/*}"
+[ -n "${startdir}" -a "${startdir}" != "$0" ] \
+  || startdir="."
+case "$startdir" in
+  /* ) : ;;
+  . ) unset startdir ;;
+esac
+case "$startdir" in
+  /* ) : ;;
+  '' | * )
+    startdir="$PWD${startdir:+/}${startdir}" ;;
+esac
 
-mkdir $BUILD_DIR
+cd "$startdir"
+info "working directory: '${PWD}' ('${startdir}')"
+
+info "Cleaning up..."
+mkdir_clean "$BUILD_DIR"
+mkdir_clean "$DIST_DIR"
+
+: "${DOWNLOADS_DIR:=$PWD/downloads}"
+info "downloads directory: '${DOWNLOADS_DIR}'"
+[ -n "${DOWNLOADS_DIR}" -a ! -d "${DOWNLOADS_DIR}/" ] \
+  && mkdir -pv "${DOWNLOADS_DIR}"
+
 cd $BUILD_DIR
+info "building in directory: '${PWD}'"
 
-pwd
+t_acestream_app="${DOWNLOADS_DIR:+${DOWNLOADS_DIR}/}acestream.apk"
+if [ -f "${t_acestream_app}" -a -s "${t_acestream_app}" ] ; then
+  info "found existing acestream apk file: '${t_acestream_app}'. skipping download."
+else
+  echo "Downloading latest AceStream engine for Android..."
+  wget "$LATEST_ANDROID_ENGINE_URI" -O "${t_acestream_app}"
+fi
 
-echo "Downloading latest AceStream engine for Android..."
-wget $LATEST_ANDROID_ENGINE_URI -O acestream.apk
+info "Unpacking..."
+mkdir -pv acestream_bundle
+unzip -q "${t_acestream_app}" -d acestream_bundle
 
-echo "Unpacking..."
-mkdir acestream_bundle
-unzip -q acestream.apk -d acestream_bundle
-
-echo "Extracting resources..."
+info "Extracting resources..."
 mkdir acestream_engine
-unzip -q acestream_bundle/res/raw/"$ARCH_EXT"_private_py.zip -d acestream_engine
-unzip -q acestream_bundle/res/raw/"$ARCH_EXT"_private_res.zip -d acestream_engine
-unzip -q acestream_bundle/res/raw/public_res.zip -d acestream_engine
+for t_basefname in \
+  private_py.zip \
+  private_res.zip \
+  public_res.zip \
+  # end
+do
+  info "attepmting to find and extract the archive: '*${t_basefname}' . . ."
+  unset t_processed
 
-echo "Patching Python..."
-mkdir python27
+  for t_archpref in ${ARCH_EXT_LIST} ''
+  do
+    for t_basedir in acestream_bundle
+    do
+      for t_topdir in \
+        "res/raw" \
+        "assets/engine" \
+        # end
+      do
+        t_fname="${t_basedir:+${t_basedir}/}${t_topdir:+${t_topdir}/}${t_archpref:+${t_archpref}_}${t_basefname}"
+        [ -e "${t_fname}" ] || continue
+
+        info " found archive: '${t_fname}'. extracting . . ."
+        t_processed=x
+        unzip -q "${t_fname}" -d acestream_engine \
+          || die "failed to decompress the archive '${t_fname}'"
+
+        [ -n "${t_processed}" ] && break
+      done
+      [ -n "${t_processed}" ] && break
+    done
+    [ -n "${t_processed}" ] && break
+  done
+  [ -n "${t_processed}" ] \
+    || die "could not find an archive based on the basename '${t_basefname}'"
+done
+
+info "Patching Python..."
+mkdir -pv python27
 unzip -q acestream_engine/python/lib/python27.zip -d python27
-cp -r -f ../mods/python27/* python27/
+cp -rf ../mods/python27/* python27/
 
-echo "Patching AceStream engine..."
+info "Removing spurious *.py[co] (python) files . . ."
+find python27/ -iname '*.py[co]' -print0 | sort -z | xargs -0r --verbose rm -v
+
+info "Patching AceStream engine..."
 cp -f ../mods/acestreamengine/* acestream_engine/
 chmod +x acestream_engine/python/bin/python
 
-echo "Bundling Python..."
+info "Bundling Python..."
 cd python27
 zip -q -r python27.zip *
 mv -f python27.zip ../acestream_engine/python/lib/
 cd ..
 
-echo "Making distributable..."
-cd ..
-mkdir $DIST_DIR
-mkdir $DIST_DIR/androidfs
-cp -r chroot/* $DIST_DIR/androidfs/
-cp -r -f platform/$1/* $DIST_DIR/androidfs/
-cp scripts/start_acestream.sh $DIST_DIR/
-cp scripts/stop_acestream.sh $DIST_DIR/
-cp scripts/acestream-user.conf $DIST_DIR/
-cp scripts/acestream.sh $DIST_DIR/androidfs/system/bin/
-mv $BUILD_DIR/acestream_engine/* $DIST_DIR/androidfs/data/data/org.acestream.media/files/
+info "Making distributable..."
+cd "${startdir}"
+mkdir -pv "$DIST_DIR/androidfs"
+cp -r chroot/* "$DIST_DIR/androidfs/"
+cp -r -f "platform/${ARCH_OWN}/"* "$DIST_DIR/androidfs/"
+cp scripts/start_acestream.sh "$DIST_DIR/"
+cp scripts/stop_acestream.sh "$DIST_DIR/"
+cp scripts/acestream-user.conf "$DIST_DIR/"
+cp scripts/acestream.sh "$DIST_DIR/androidfs/system/bin/"
+mv "$BUILD_DIR/acestream_engine/"* "$DIST_DIR/androidfs/data/data/org.acestream.media/files/"
 
-echo "Done!"
+info "Done!"
