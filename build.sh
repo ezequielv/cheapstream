@@ -57,6 +57,20 @@ mkdir_clean()
     || return $?
   mkdir -pv "${l_dir}"
 }
+
+unset g_acestream_apk
+
+# updates g_acestream_apk environment variable.
+# returns 0 if there is a valid value in that variable on exit, non-zero
+# otherwise.
+set_acestream_app_cond()
+{
+  [ -z "${g_acestream_apk}" ] || return 0
+  [ -n "${1}" -a -f "${1}" -a -r "${1}" ] \
+    || return $?
+  g_acestream_apk="${1}"
+}
+
 # }}}
 
 ARCH_OWN="$1"
@@ -115,17 +129,47 @@ info "downloads directory: '${DOWNLOADS_DIR}'"
 cd $BUILD_DIR
 info "building in directory: '${PWD}'"
 
-t_acestream_app="${DOWNLOADS_DIR:+${DOWNLOADS_DIR}/}acestream.apk"
-if [ -f "${t_acestream_app}" -a -s "${t_acestream_app}" ] ; then
-  info "found existing acestream apk file: '${t_acestream_app}'. skipping download."
-else
-  echo "Downloading latest AceStream engine for Android..."
-  wget "$LATEST_ANDROID_ENGINE_URI" -O "${t_acestream_app}"
+# use the environment variable ACESTREAM_APK, if non-empty.
+if [ -n "${ACESTREAM_APK}" ] ; then
+  info "attempting to use specified ACESTREAM_APK: '${ACESTREAM_APK}'"
+  case "${ACESTREAM_APK}" in
+    # absolute path: leave unmodified
+    /* )
+      set_acestream_app_cond "${ACESTREAM_APK}" \
+        || :
+      ;;
+    # relative paths: try to find the file
+    * )
+      for t_basedir in \
+        "$startdir" \
+        "$DOWNLOADS_DIR" \
+        # end
+      do
+        t_f="${t_basedir:+${t_basedir}}/${ACESTREAM_APK}"
+        set_acestream_app_cond "${t_f}" \
+          || continue
+        break
+      done
+      ;;
+  esac
+  [ -n "${g_acestream_apk}" ] \
+    || f_abort "could not find a (valid) file for the specified value of ACESTREAM_APK ('${ACESTREAM_APK}')"
 fi
+
+if [ -z "${g_acestream_apk}" ] ; then
+  g_acestream_apk="${DOWNLOADS_DIR:+${DOWNLOADS_DIR}/}acestream.apk"
+  if [ -f "${g_acestream_apk}" -a -s "${g_acestream_apk}" ] ; then
+    info "found previously downloaded acestream apk file: '${g_acestream_apk}'. skipping download."
+  else
+    echo "Downloading latest AceStream engine for Android..."
+    wget "$LATEST_ANDROID_ENGINE_URI" -O "${g_acestream_apk}"
+  fi
+fi
+info "using acestream apk file: '${g_acestream_apk}'"
 
 info "Unpacking..."
 mkdir -pv acestream_bundle
-unzip -q "${t_acestream_app}" -d acestream_bundle
+unzip -q "${g_acestream_apk}" -d acestream_bundle
 
 info "Extracting resources..."
 mkdir acestream_engine
